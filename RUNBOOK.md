@@ -55,7 +55,9 @@ aws cloudwatch put-metric-alarm --alarm-name billing-over-1usd \
    | SSH   | 22   | **My IP**         | admin only — never 0.0.0.0/0 |
    | HTTP  | 80   | Anywhere (0.0.0.0/0) | serve the app + n8n |
    | HTTPS | 443  | Anywhere (0.0.0.0/0) | after you add a domain |
-7. **Storage:** 8–20 GB gp3 (within the 30 GB free-tier allowance).
+7. **Storage:** **20 GB** gp3 (within the 30 GB free-tier allowance). Don't use
+   the 8 GB default — n8n's `node_modules` alone is ~2 GB, plus the 2 GB swap
+   file and the Python venv, and the disk fills up mid-provision.
 8. **Advanced details → User data:** paste the entire contents of
    `cloud-init.yaml`.
 9. **Launch.**

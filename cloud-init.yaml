@@ -12,6 +12,10 @@
 # HTTPS is intentionally left as a documented one-liner in RUNBOOK.md because
 # it needs a real domain pointing at the instance (Let's Encrypt won't issue
 # for *.compute.amazonaws.com).
+#
+# IMPORTANT: give the instance a 20 GB root volume (not the 8 GB default).
+# n8n's node_modules (~2 GB) + the 2 GB swap file + the Python venv overflow
+# an 8 GB disk mid-provision. Verified live on a t3.micro, 20 GB, eu-north-1.
 # ---------------------------------------------------------------------------
 package_update: true
 package_upgrade: false
@@ -96,6 +100,8 @@ write_files:
       Environment=N8N_PROXY_HOPS=1
       Environment=N8N_DIAGNOSTICS_ENABLED=false
       Environment=N8N_RUNNERS_ENABLED=true
+      # Plain HTTP behind the proxy — allow the login cookie without HTTPS.
+      Environment=N8N_SECURE_COOKIE=false
       # Point WEBHOOK_URL at your public address so webhook nodes show the right URL:
       # Environment=WEBHOOK_URL=http://YOUR_PUBLIC_IP/n8n/
       EnvironmentFile=-/etc/n8n.env
@@ -104,6 +110,14 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
+  # --- 2 GB swap (t3.micro has only 1 GB RAM; prevents OOM during the n8n
+  #     npm install and when both services run) --------------------------------
+  - fallocate -l 2G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - bash -c "echo '/swapfile none swap sw 0 0' >> /etc/fstab"
+
   # --- Node.js 20 (for n8n) -------------------------------------------------
   - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
   - apt-get install -y nodejs
