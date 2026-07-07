@@ -1,0 +1,133 @@
+#cloud-config
+# ---------------------------------------------------------------------------
+# AWS EC2 provisioning — one paste turns a blank Ubuntu 22.04/24.04 t3.micro
+# (free tier) into a box running a FastAPI service + self-hosted n8n behind
+# nginx. Paste this into the "User data" field when launching the instance.
+#
+# What it stands up:
+#   * DocuChat backend (FastAPI, RAG)      -> 127.0.0.1:8000  (systemd)
+#   * n8n (self-hosted automation)         -> 127.0.0.1:5678  (systemd)
+#   * nginx reverse proxy                  -> :80  /  -> app,  /n8n/ -> n8n
+#
+# HTTPS is intentionally left as a documented one-liner in RUNBOOK.md because
+# it needs a real domain pointing at the instance (Let's Encrypt won't issue
+# for *.compute.amazonaws.com).
+# ---------------------------------------------------------------------------
+package_update: true
+package_upgrade: false
+
+packages:
+  - nginx
+  - git
+  - python3-pip
+  - python3-venv
+  - curl
+
+write_files:
+  # ---- nginx reverse proxy -------------------------------------------------
+  - path: /etc/nginx/sites-available/app.conf
+    content: |
+      server {
+        listen 80 default_server;
+        server_name _;
+
+        # FastAPI app at the root
+        location / {
+          proxy_pass http://127.0.0.1:8000;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # self-hosted n8n under /n8n/ (needs websocket upgrade).
+        # No trailing slash on proxy_pass — the /n8n/ prefix is preserved to
+        # match N8N_PATH=/n8n/ so n8n's asset URLs resolve under the subpath.
+        location /n8n/ {
+          proxy_pass http://127.0.0.1:5678;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+      }
+
+  # ---- systemd unit: FastAPI app ------------------------------------------
+  - path: /etc/systemd/system/docuchat.service
+    content: |
+      [Unit]
+      Description=DocuChat FastAPI backend
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=www-data
+      WorkingDirectory=/opt/app/backend
+      ExecStart=/opt/app/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
+      Restart=always
+      RestartSec=3
+      # Set real values in /etc/docuchat.env then `systemctl restart docuchat`
+      EnvironmentFile=-/etc/docuchat.env
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # ---- systemd unit: n8n ---------------------------------------------------
+  - path: /etc/systemd/system/n8n.service
+    content: |
+      [Unit]
+      Description=n8n self-hosted automation
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=n8n
+      WorkingDirectory=/home/n8n
+      ExecStart=/usr/bin/n8n start
+      Restart=always
+      RestartSec=3
+      Environment=N8N_PORT=5678
+      Environment=N8N_HOST=127.0.0.1
+      Environment=N8N_PATH=/n8n/
+      Environment=N8N_PROXY_HOPS=1
+      Environment=N8N_DIAGNOSTICS_ENABLED=false
+      Environment=N8N_RUNNERS_ENABLED=true
+      # Point WEBHOOK_URL at your public address so webhook nodes show the right URL:
+      # Environment=WEBHOOK_URL=http://YOUR_PUBLIC_IP/n8n/
+      EnvironmentFile=-/etc/n8n.env
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # --- Node.js 20 (for n8n) -------------------------------------------------
+  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  - apt-get install -y nodejs
+  - npm install -g n8n
+
+  # --- app: clone + venv ----------------------------------------------------
+  - git clone --depth 1 https://github.com/yagaMI-Reverse/docuchat /opt/app
+  - python3 -m venv /opt/app/venv
+  - /opt/app/venv/bin/pip install --upgrade pip
+  - /opt/app/venv/bin/pip install -r /opt/app/backend/requirements.txt
+  - chown -R www-data:www-data /opt/app
+
+  # --- n8n service user -----------------------------------------------------
+  - useradd -m -s /bin/bash n8n || true
+
+  # --- nginx: enable our site ----------------------------------------------
+  - rm -f /etc/nginx/sites-enabled/default
+  - ln -sf /etc/nginx/sites-available/app.conf /etc/nginx/sites-enabled/app.conf
+  - nginx -t
+
+  # --- start everything -----------------------------------------------------
+  - systemctl daemon-reload
+  - systemctl enable --now docuchat
+  - systemctl enable --now n8n
+  - systemctl restart nginx
+
+final_message: "Provisioned in $UPTIME s. App on / , n8n on /n8n/ . See RUNBOOK.md for HTTPS + billing alarm."
